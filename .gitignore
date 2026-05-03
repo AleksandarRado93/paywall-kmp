@@ -1,0 +1,20 @@
+*.iml
+.kotlin
+.gradle
+**/build/
+xcuserdata
+local.properties
+.idea
+.DS_Store
+captures
+.externalNativeBuild
+.cxx
+node_modules/
+
+# JVM crash dumps
+hs_err_pid*.log
+*.hprof
+
+# Secrets / publishing credentials
+gradle.properties.local
+**/gradle.properties.local
