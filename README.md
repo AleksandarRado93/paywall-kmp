@@ -59,7 +59,7 @@ In your shared module's `build.gradle.kts`:
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.2.0")
+            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.2.1")
         }
     }
 }
@@ -188,6 +188,9 @@ RevenueCat's cross-platform `test_*` keys point at the Test Store and crash prod
 Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions. Once `1.0.0` ships, semantic versioning applies strictly.
 
 ## Changelog
+
+### 0.2.1
+- Lowered Android `minSdk` from 29 to 21 (Android 5.0 Lollipop, matching RevenueCat's own minimum). Prevents the library from forcing consumers onto Android 10+.
 
 ### 0.2.0
 - Added `RevenueCatConfig.acceptTestKeys` flag — set to `true` (typically `isDebugBuild`) to allow cross-platform `test_*` API keys for prototyping against RevenueCat's Test Store. Default `false` preserves production safety.
