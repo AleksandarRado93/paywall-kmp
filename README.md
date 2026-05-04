@@ -59,7 +59,7 @@ In your shared module's `build.gradle.kts`:
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.2.1")
+            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.2.2")
         }
     }
 }
@@ -188,6 +188,9 @@ RevenueCat's cross-platform `test_*` keys point at the Test Store and crash prod
 Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions. Once `1.0.0` ships, semantic versioning applies strictly.
 
 ## Changelog
+
+### 0.2.2
+- Raised Android `minSdk` from 21 to 24 (Android 7.0 Nougat, ~98% device coverage). Matches the typical KMP-app minimum without forcing consumers onto a stricter floor.
 
 ### 0.2.1
 - Lowered Android `minSdk` from 29 to 21 (Android 5.0 Lollipop, matching RevenueCat's own minimum). Prevents the library from forcing consumers onto Android 10+.
