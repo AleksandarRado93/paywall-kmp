@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "io.github.aleksandarrado93.paywall"
-version = "0.1.0"
+version = "0.2.0"
 
 kotlin {
     @OptIn(ExperimentalKotlinGradlePluginApi::class)

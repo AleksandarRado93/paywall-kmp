@@ -22,7 +22,7 @@ fun configureRevenueCat(
     config: RevenueCatConfig,
     crashReporter: PaywallCrashReporterBridge? = null,
 ): Boolean {
-    if (!isRevenueCatApiKeyValid(config.apiKey)) return false
+    if (!isRevenueCatApiKeyValid(config.apiKey, acceptTestKeys = config.acceptTestKeys)) return false
     Purchases.logLevel = config.logLevel
     return try {
         Purchases.configure(apiKey = config.apiKey)
