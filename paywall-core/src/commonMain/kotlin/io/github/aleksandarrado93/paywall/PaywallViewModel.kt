@@ -72,18 +72,21 @@ open class PaywallViewModel(
 
     private val _plansState = MutableStateFlow<PlansState>(PlansState.Loading)
     private val _purchaseState = MutableStateFlow<PurchaseUiState>(PurchaseUiState.Idle)
+    private val _freeTrials = MutableStateFlow<Map<String, FreeTrial>>(emptyMap())
 
     val uiState: StateFlow<PaywallUiState> = combine(
         premiumRepository.isPremium,
         billingManager.customerInfo,
         _plansState,
         _purchaseState,
-    ) { isPremium, customerInfo, plans, purchase ->
+        _freeTrials,
+    ) { isPremium, customerInfo, plans, purchase, freeTrials ->
         PaywallUiState(
             isPremium = isPremium,
             activePremiumProductId = customerInfo.activePremiumProductId(entitlementId),
             plans = plans,
             purchase = purchase,
+            freeTrials = freeTrials,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STATE_TIMEOUT_MS), PaywallUiState())
 
@@ -108,6 +111,13 @@ open class PaywallViewModel(
                     billingManager.refreshCustomerInfo()
                     billingManager.getCurrentOffering()
                 }
+                // Resolve trials before publishing Ready so trial copy doesn't pop
+                // in after the prices. A slow eligibility check just hides trials.
+                _freeTrials.value = offering?.let {
+                    withTimeoutOrNull(productLoadTimeoutMs) {
+                        billingManager.getEligibleFreeTrials(it.availablePackages)
+                    }
+                }.orEmpty()
                 _plansState.value = if (offering != null) {
                     PlansState.Ready(offering)
                 } else {

@@ -6,6 +6,7 @@ import com.revenuecat.purchases.kmp.ktx.awaitOfferings
 import com.revenuecat.purchases.kmp.ktx.awaitPurchase
 import com.revenuecat.purchases.kmp.ktx.awaitRestore
 import com.revenuecat.purchases.kmp.models.CustomerInfo
+import com.revenuecat.purchases.kmp.models.IntroEligibilityStatus
 import com.revenuecat.purchases.kmp.models.Offering
 import com.revenuecat.purchases.kmp.models.Package
 import io.github.aleksandarrado93.paywall.bridges.NoOpPaywallCrashReporterBridge
@@ -13,6 +14,8 @@ import io.github.aleksandarrado93.paywall.bridges.PaywallCrashReporterBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 /**
  * Thin coroutine wrapper around the RevenueCat KMP SDK. Owns the latest known
@@ -71,6 +74,49 @@ class BillingManager(
             crashReporter.logNonFatal(e)
             null
         }
+    }
+
+    /**
+     * Returns the free trials from [packages] that this user can actually get,
+     * keyed by [Package.identifier]. Packages without a trial, or whose trial
+     * the user is not eligible for, are left out.
+     *
+     * Play Store trials are already eligibility-filtered by Google. App Store
+     * trials are checked with RevenueCat's intro eligibility API; only
+     * [IntroEligibilityStatus.ELIGIBLE] counts, so `UNKNOWN` hides the trial as
+     * RevenueCat recommends. A failed check is reported through
+     * [crashReporter] and also hides the trial.
+     */
+    suspend fun getEligibleFreeTrials(packages: List<Package>): Map<String, FreeTrial> {
+        val trials = packages.mapNotNull { pkg -> pkg.freeTrial()?.let { pkg to it } }
+        if (trials.isEmpty()) return emptyMap()
+
+        val toCheck = trials.map { it.first }.filter { it.needsTrialEligibilityCheck }
+        val eligibleProductIds = if (toCheck.isEmpty()) {
+            emptySet()
+        } else {
+            try {
+                val statuses = suspendCoroutine { continuation ->
+                    Purchases.sharedInstance.checkTrialOrIntroPriceEligibility(
+                        products = toCheck.map { it.storeProduct },
+                    ) { result -> continuation.resume(result) }
+                }
+                statuses
+                    .filterValues { it == IntroEligibilityStatus.ELIGIBLE }
+                    .keys
+                    .map { it.id }
+                    .toSet()
+            } catch (e: Exception) {
+                crashReporter.logNonFatal(e)
+                emptySet()
+            }
+        }
+
+        return trials
+            .filter { (pkg, _) ->
+                !pkg.needsTrialEligibilityCheck || pkg.storeProduct.id in eligibleProductIds
+            }
+            .associate { (pkg, trial) -> pkg.identifier to trial }
     }
 
     /**

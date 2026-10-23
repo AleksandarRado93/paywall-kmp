@@ -16,6 +16,8 @@ The UI stays per-app — bring your own Compose Multiplatform `PaywallScreen` an
 | `BillingManager` | Coroutine wrapper around RevenueCat with `customerInfo: StateFlow` |
 | `PaywallViewModel` | Plans/purchase state machine with timeout handling, restore, error mapping |
 | `CustomerInfo.hasActivePremium(entitlementId)` | Extension for entitlement checks |
+| `FreeTrial`, `Package.freeTrial()` | Free trial length and price after the trial, read from the store product |
+| `BillingManager.getEligibleFreeTrials(packages)` | Only the trials this user can still get (App Store eligibility checked for you) |
 | `PremiumStateRepository` | Bridge — your DataStore/SharedPreferences cache |
 | `PaywallAnalyticsBridge` | Bridge — your Firebase/Amplitude/etc. analytics provider |
 | `PaywallCrashReporterBridge` | Bridge — your Crashlytics/Sentry/etc. crash reporter |
@@ -145,6 +147,31 @@ fun PaywallScreen(viewModel: PaywallViewModel = koinViewModel()) {
 }
 ```
 
+## Free trials
+
+Never hardcode trial copy. A trial is only available once per user, and the
+store setup can change. `PaywallUiState.freeTrials` holds the trials this user
+can actually get, keyed by package identifier, and is filled before
+`PlansState.Ready` is published:
+
+```kotlin
+val trial = state.freeTrials[pkg.identifier]
+if (trial != null) {
+    // e.g. "3-day free trial, then $39.99 every 6 months"
+    val length = "${trial.period.value}-${trial.period.unit.name.lowercase()}"
+    Text("$length free trial, then ${trial.priceAfterTrial.formatted}")
+}
+```
+
+- **Play Store:** trials come from the default subscription option; Google only
+  returns offers the user is eligible for.
+- **App Store:** the introductory free trial is checked with RevenueCat's
+  eligibility API. Only `ELIGIBLE` shows the trial; `UNKNOWN` hides it.
+
+Outside `PaywallViewModel` (e.g. a custom promo screen), call
+`billingManager.getEligibleFreeTrials(offering.availablePackages)` yourself.
+`Package.freeTrial()` alone is **not** eligibility-filtered on iOS.
+
 ## Why bridges instead of direct Firebase dependency?
 
 The library is intentionally agnostic about your analytics/crash/persistence stack. You might use Firebase, you might use Amplitude or Sentry. By keeping these as bridges:
@@ -188,6 +215,11 @@ RevenueCat's cross-platform `test_*` keys point at the Test Store and crash prod
 Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions. Once `1.0.0` ships, semantic versioning applies strictly.
 
 ## Changelog
+
+### 0.4.0
+- Added `FreeTrial` and `Package.freeTrial()` — trial length, price after the trial, and renewal period, read from the store product (Play Store default option free phase, App Store introductory free trial).
+- Added `BillingManager.getEligibleFreeTrials(packages)` — returns only the trials the user can still get; App Store trials go through RevenueCat's intro eligibility check (`UNKNOWN` counts as not eligible).
+- `PaywallUiState.freeTrials` — `PaywallViewModel` resolves eligible trials before publishing `PlansState.Ready`. Source-compatible: new field with a default.
 
 ### 0.3.0
 - Added `BillingManager.getOffering(identifier)` — fetch any offering by its RevenueCat id, not just the `current` one. Enables promotional / discounted / win-back paywalls that live in a separate offering.
