@@ -43,13 +43,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  * }
  * ```
  *
+ * The product load timeout defaults to 5 seconds. To customize it, subclass
+ * [PaywallViewModel] and override [productLoadTimeoutMs]. This keeps the
+ * primary constructor reflection-friendly so Koin's `viewModelOf(::PaywallViewModel)`
+ * works without an explicit DSL block.
+ *
  * @param config The active [RevenueCatConfig] (for entitlement id resolution).
  * @param billingManager Wraps the RevenueCat SDK.
  * @param premiumRepository Persisted "is premium?" cache, written on success.
  * @param analytics Bridge for tracking conversion / failure events.
  * @param crashReporter Bridge for reporting non-fatal exceptions.
- * @param productLoadTimeoutMs Max time to wait for the offering fetch before
- *   falling back to [PlansState.Unavailable]. Defaults to 5 seconds.
  */
 open class PaywallViewModel(
     config: RevenueCatConfig,
@@ -57,8 +60,13 @@ open class PaywallViewModel(
     private val premiumRepository: PremiumStateRepository,
     private val analytics: PaywallAnalyticsBridge,
     private val crashReporter: PaywallCrashReporterBridge,
-    private val productLoadTimeoutMs: Long = DEFAULT_PRODUCT_LOAD_TIMEOUT_MS,
 ) : ViewModel() {
+
+    /**
+     * Max time to wait for the offering fetch before falling back to
+     * [PlansState.Unavailable]. Override in a subclass to customize.
+     */
+    protected open val productLoadTimeoutMs: Long = DEFAULT_PRODUCT_LOAD_TIMEOUT_MS
 
     private val entitlementId = config.entitlementId
 
@@ -125,6 +133,25 @@ open class PaywallViewModel(
         runPurchase(plan = planLabel) {
             val pkg = resolvePackage(packageType) ?: error(ERROR_PRODUCT_UNAVAILABLE)
             billingManager.purchase(pkg)
+        }
+    }
+
+    /**
+     * Starts a purchase for an already-resolved [packageToPurchase], regardless
+     * of its [PackageType] (works for custom packages and packages that live in
+     * a non-current offering — see [BillingManager.getOffering]). Shares the
+     * same orchestration as [purchase]: emits to [purchaseSuccess] on
+     * entitlement activation, otherwise publishes a [PurchaseUiState.Error].
+     *
+     * @param packageToPurchase The exact package to buy.
+     * @param planLabel A short label for analytics. Defaults to the package id.
+     */
+    fun purchasePackage(
+        packageToPurchase: Package,
+        planLabel: String = packageToPurchase.identifier,
+    ) {
+        runPurchase(plan = planLabel) {
+            billingManager.purchase(packageToPurchase)
         }
     }
 
@@ -196,22 +223,24 @@ open class PaywallViewModel(
         _purchaseState.value = PurchaseUiState.Idle
     }
 
-    private companion object {
+    companion object {
         const val DEFAULT_PRODUCT_LOAD_TIMEOUT_MS = 5_000L
-        const val STATE_TIMEOUT_MS = 5_000L
-        const val ERROR_PRODUCT_UNAVAILABLE = "Product not available"
-        const val ERROR_PURCHASE_FAILED = "Purchase failed"
-        const val ERROR_PURCHASE_NOT_ACTIVE = "Purchase did not activate premium"
-        const val ERROR_RESTORE_FAILED = "Restore failed"
-        const val ERROR_NO_ACTIVE_SUBSCRIPTION = "No active subscription found"
+        private const val STATE_TIMEOUT_MS = 5_000L
+        private const val ERROR_PRODUCT_UNAVAILABLE = "Product not available"
+        private const val ERROR_PURCHASE_FAILED = "Purchase failed"
+        private const val ERROR_PURCHASE_NOT_ACTIVE = "Purchase did not activate premium"
+        private const val ERROR_RESTORE_FAILED = "Restore failed"
+        private const val ERROR_NO_ACTIVE_SUBSCRIPTION = "No active subscription found"
     }
 }
 
 /**
  * Looks up a predefined package by [PackageType] without throwing, returning null
- * when the offering doesn't include that type.
+ * when the offering doesn't include that type. Useful in Compose UI for reading
+ * the formatted price of a specific plan without coupling to the variant enum
+ * inside [PaywallViewModel].
  */
-internal fun Offering.packageOf(type: PackageType): Package? = when (type) {
+fun Offering.packageOf(type: PackageType): Package? = when (type) {
     PackageType.ANNUAL -> annual
     PackageType.SIX_MONTH -> sixMonth
     PackageType.THREE_MONTH -> threeMonth

@@ -56,6 +56,24 @@ class BillingManager(
     }
 
     /**
+     * Fetches a specific [Offering] by its RevenueCat dashboard [identifier],
+     * independent of which offering is marked "current". Returns `null` when no
+     * offering with that identifier exists, or when the fetch fails for any
+     * reason (the exception is reported through [crashReporter]).
+     *
+     * Useful for promotional / discounted / win-back paywalls that live in a
+     * separate offering from the default one.
+     */
+    suspend fun getOffering(identifier: String): Offering? {
+        return try {
+            Purchases.sharedInstance.awaitOfferings().getOffering(identifier)
+        } catch (e: Exception) {
+            crashReporter.logNonFatal(e)
+            null
+        }
+    }
+
+    /**
      * Starts a purchase for [packageToPurchase]. Throws on failure — callers
      * (typically [PaywallViewModel]) are expected to catch
      * [com.revenuecat.purchases.kmp.models.PurchasesTransactionException] to

@@ -189,6 +189,10 @@ Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions.
 
 ## Changelog
 
+### 0.3.0
+- Added `BillingManager.getOffering(identifier)` — fetch any offering by its RevenueCat id, not just the `current` one. Enables promotional / discounted / win-back paywalls that live in a separate offering.
+- Added `PaywallViewModel.purchasePackage(packageToPurchase, planLabel)` — purchase an already-resolved `Package` (including custom packages and packages from a non-current offering) through the same orchestration as `purchase(packageType)` (premium flag, analytics, `purchaseSuccess`, error mapping).
+
 ### 0.2.2
 - Raised Android `minSdk` from 21 to 24 (Android 7.0 Nougat, ~98% device coverage). Matches the typical KMP-app minimum without forcing consumers onto a stricter floor.
 
