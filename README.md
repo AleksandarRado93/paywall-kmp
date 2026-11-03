@@ -61,22 +61,17 @@ In your shared module's `build.gradle.kts`:
 kotlin {
     sourceSets {
         commonMain.dependencies {
-            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.2.2")
+            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.5.0")
         }
     }
 }
 ```
 
-### 4. Link `PurchasesHybridCommon` via SPM (iOS only)
+Requires Kotlin 2.3.20+ (RevenueCat KMP 3.x).
 
-The library transitively depends on the RevenueCat KMP SDK, but iOS still requires the native `PurchasesHybridCommon` Swift package linked via Xcode → Package Dependencies. Without this, iOS will fail at link time with `Undefined symbols: _OBJC_CLASS_$_RCPurchases`.
+### 4. iOS: no native package needed
 
-```
-File → Add Package Dependencies →
-  https://github.com/RevenueCat/purchases-hybrid-common
-  → Up to Next Major Version: 17.x
-  → Add PurchasesHybridCommon to your iOS target
-```
+Since 0.5.0 the library uses RevenueCat KMP 3.x, which bundles the native iOS SDK. Don't add `PurchasesHybridCommon` to your Xcode project; if you're upgrading from 0.4.x, remove it (and `PurchasesHybridCommonUI`) from Package Dependencies and every target. See RevenueCat's [3.0.0 migration guide](https://github.com/RevenueCat/purchases-kmp/blob/main/migrations/3.0.0-MIGRATION.md).
 
 ## Quick start
 
@@ -215,6 +210,11 @@ RevenueCat's cross-platform `test_*` keys point at the Test Store and crash prod
 Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions. Once `1.0.0` ships, semantic versioning applies strictly.
 
 ## Changelog
+
+### 0.5.0
+- Updated RevenueCat KMP from 2.10.1 to 3.16.0 (native iOS SDK 5.98.0). Fixes the iOS build with Xcode 27, which rejects `PaywallColor.swift` in the iOS SDK 5.67.0 that 2.10.1 pinned.
+- Requires Kotlin 2.3.20+.
+- iOS consumers must remove the `PurchasesHybridCommon` / `PurchasesHybridCommonUI` Swift packages; the native SDK now comes with the KMP library.
 
 ### 0.4.0
 - Added `FreeTrial` and `Package.freeTrial()` — trial length, price after the trial, and renewal period, read from the store product (Play Store default option free phase, App Store introductory free trial).
