@@ -1,26 +1,41 @@
 # paywall-kmp
 
-A reusable RevenueCat-backed subscription/billing layer for Kotlin Multiplatform apps (Android + iOS).
+A reusable subscription/billing layer for Kotlin Multiplatform apps (Android + iOS), built directly on **Google Play Billing** and **StoreKit 2** — no third-party billing service.
 
-Extracted from a production app to provide a single source of truth for the parts of paywall code that don't change between apps: `BillingManager`, `PaywallViewModel`, the purchase state machine, and the helpers that prevent common production crashes (e.g. sandbox keys in production builds).
+Extracted from a production app to provide a single source of truth for the parts of paywall code that don't change between apps: `BillingManager`, `PaywallViewModel`, the purchase state machine, and the store edge cases that cause lost revenue in hand-written billing code (unacknowledged Play purchases, missed renewals, pending payments).
 
 The UI stays per-app — bring your own Compose Multiplatform `PaywallScreen` and call into the library's ViewModel.
+
+> **Upgrading from 0.x (RevenueCat)?** See [Migrating from 0.5.x](#migrating-from-05x). 0.5.0 stays published, so you can pin it again at any time.
 
 ## What's in the box
 
 | Class | Purpose |
 |---|---|
-| `RevenueCatConfig` | Holds API key, entitlement ID, SDK log level, and the `acceptTestKeys` flag |
-| `isRevenueCatApiKeyValid(apiKey, acceptTestKeys)` | Validates the key — accepts `appl_*`/`goog_*` always, accepts `test_*` only when `acceptTestKeys=true` |
-| `configureRevenueCat(config, crashReporter?)` | Crash-safe RC initialization, returns `Boolean` for success |
-| `BillingManager` | Coroutine wrapper around RevenueCat with `customerInfo: StateFlow` |
-| `PaywallViewModel` | Plans/purchase state machine with timeout handling, restore, error mapping |
-| `CustomerInfo.hasActivePremium(entitlementId)` | Extension for entitlement checks |
-| `FreeTrial`, `Package.freeTrial()` | Free trial length and price after the trial, read from the store product |
-| `BillingManager.getEligibleFreeTrials(packages)` | Only the trials this user can still get (App Store eligibility checked for you) |
+| `BillingConfig` / `OfferingConfig` | Which product ids the app sells, grouped into paywalls (offerings), and which grant premium |
+| `BillingManager` | Coroutine facade over the store with `customerInfo: StateFlow` |
+| `PaywallViewModel` | Plans/purchase state machine with timeout handling, pending payments, restore, error mapping |
+| `StoreClient` | The store interface: `AndroidStoreClient` (Play Billing 8), `IosStoreClient` (StoreKit 2 via a Swift bridge), `FakeStoreClient` |
+| `Offering`, `Package`, `PackageType`, `StoreProduct`, `Price`, `Period`, `FreeTrial` | Store-independent models |
+| `CustomerInfo` | Active purchases + the product granting premium |
 | `PremiumStateRepository` | Bridge — your DataStore/SharedPreferences cache |
 | `PaywallAnalyticsBridge` | Bridge — your Firebase/Amplitude/etc. analytics provider |
 | `PaywallCrashReporterBridge` | Bridge — your Crashlytics/Sentry/etc. crash reporter |
+
+## What the store clients handle for you
+
+**Android (`AndroidStoreClient`)**
+- Acknowledges every purchase — Play refunds unacknowledged purchases after 3 days — including ones found later (completed pending payments, purchases made while the app was killed).
+- Pending purchases (cash / slow payment methods) don't grant premium until Play reports them purchased.
+- Re-checks purchases each time the app returns to the foreground.
+- Picks the free-trial offer when Play returns one (Play only returns offers the user is eligible for), otherwise the base plan.
+- Replaces the active subscription when the user switches plans.
+
+**iOS (`IosStoreClient` + `PaywallStoreKitBridge.swift`)**
+- Listens to `Transaction.updates` from launch (renewals, refunds, Ask to Buy) and finishes unfinished transactions.
+- Premium comes from `Transaction.currentEntitlements`, verified on device by StoreKit — no server needed.
+- Free trials are shown only when `isEligibleForIntroOffer` is true.
+- Restore runs `AppStore.sync()`.
 
 ## Installation
 
@@ -53,44 +68,63 @@ gpr.user=YOUR_GITHUB_USERNAME
 gpr.token=YOUR_GITHUB_PERSONAL_ACCESS_TOKEN_WITH_read:packages
 ```
 
-### 3. Add the dependency
+### 3. Add the dependency and export it to the iOS framework
 
 In your shared module's `build.gradle.kts`:
 
 ```kotlin
 kotlin {
+    listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
+        target.binaries.framework {
+            baseName = "ComposeApp"
+            // Gives the Kotlin types plain Swift names (StoreProduct, not Paywall_coreStoreProduct),
+            // which PaywallStoreKitBridge.swift relies on.
+            export("io.github.aleksandarrado93.paywall:paywall-core:1.0.0-alpha01")
+        }
+    }
     sourceSets {
         commonMain.dependencies {
-            implementation("io.github.aleksandarrado93.paywall:paywall-core:0.5.0")
+            api("io.github.aleksandarrado93.paywall:paywall-core:1.0.0-alpha01")
         }
     }
 }
 ```
 
-Requires Kotlin 2.3.20+ (RevenueCat KMP 3.x).
+Requires Kotlin 2.3.20+. Android pulls in Google Play Billing 8.0.0.
 
-### 4. iOS: no native package needed
+### 4. iOS: add the Swift bridge
 
-Since 0.5.0 the library uses RevenueCat KMP 3.x, which bundles the native iOS SDK. Don't add `PurchasesHybridCommon` to your Xcode project; if you're upgrading from 0.4.x, remove it (and `PurchasesHybridCommonUI`) from Package Dependencies and every target. See RevenueCat's [3.0.0 migration guide](https://github.com/RevenueCat/purchases-kmp/blob/main/migrations/3.0.0-MIGRATION.md).
+StoreKit 2 is Swift-only, so Kotlin calls it through the `StoreKitBridge` interface. Copy [`ios/PaywallStoreKitBridge.swift`](ios/PaywallStoreKitBridge.swift) into your iOS app (add it to every app target) and change its `import ComposeApp` line if your framework has another name. Requires iOS 15+.
 
 ## Quick start
 
 ```kotlin
-// 1. Define your config
-val rcConfig = RevenueCatConfig(
-    apiKey = if (isAndroid) "goog_..." else "appl_...",
-    entitlementId = "premium",
-    logLevel = if (BuildConfig.DEBUG) LogLevel.DEBUG else LogLevel.WARN,
-    // Accept RC's cross-platform `test_*` sandbox keys ONLY in debug builds.
-    // Release builds will reject them so a sandbox key can never accidentally
-    // ship to production (which would crash on launch).
-    acceptTestKeys = BuildConfig.DEBUG,
+// 1. Describe what you sell. Product ids are per store:
+//    Play: "subscriptionId:basePlanId" (or a plain id for one base plan / one-time products)
+//    App Store: the product id.
+val billingConfig = BillingConfig(
+    offerings = listOf(
+        OfferingConfig(
+            identifier = "default", // the first offering is the "current" one
+            products = mapOf(
+                PackageType.MONTHLY to "premium:monthly",
+                PackageType.ANNUAL to "premium:annual",
+            ),
+        ),
+        OfferingConfig("gift_offer", mapOf(PackageType.SIX_MONTH to "premium:gift")),
+    ),
+    premiumProductIds = null, // null = every purchase of this app grants premium
 )
 
-// 2. Initialize RC at app startup (Android: Application.onCreate; iOS: iOSApp.swift)
-configureRevenueCat(rcConfig, crashReporter = MyCrashReporterBridge)
+// 2. Create the store client per platform
+//    Android (Application.onCreate):  AndroidStoreClient(application)
+//    iOS (iOSApp.init, Swift):        IosStoreClient(bridge: PaywallStoreKitBridge())
+//    Tests / no store account yet:    FakeStoreClient(products = ...)
 
-// 3. Implement the three bridges (one-time per app)
+// 3. Start listening at launch, so renewals and purchases finished while the app was closed are seen
+billingManager.start()
+
+// 4. Implement the three bridges (one-time per app)
 class MyPremiumStateRepository(private val dataStore: DataStore<Preferences>) : PremiumStateRepository {
     override val isPremium: Flow<Boolean> = dataStore.data.map { it[booleanPreferencesKey("is_premium")] ?: false }
     override suspend fun setPremium(isPremium: Boolean) { dataStore.edit { it[booleanPreferencesKey("is_premium")] = isPremium } }
@@ -105,17 +139,17 @@ object MyCrashReporterBridge : PaywallCrashReporterBridge {
     override fun logNonFatal(throwable: Throwable) { Firebase.crashlytics.recordException(throwable) }
 }
 
-// 4. Wire the ViewModel via Koin (or your DI of choice)
+// 5. Wire it via Koin (or your DI of choice)
 val paywallModule = module {
-    single { rcConfig }
-    single { BillingManager(crashReporter = MyCrashReporterBridge) }
+    single { billingConfig }
+    single { BillingManager(config = get(), store = get(), crashReporter = MyCrashReporterBridge) }
     single<PremiumStateRepository> { MyPremiumStateRepository(get()) }
     single<PaywallAnalyticsBridge> { MyAnalyticsBridge }
     single<PaywallCrashReporterBridge> { MyCrashReporterBridge }
-    viewModel { PaywallViewModel(get(), get(), get(), get(), get()) }
+    viewModel { PaywallViewModel(get(), get(), get(), get()) }
 }
 
-// 5. Use it from your Compose UI
+// 6. Use it from your Compose UI
 @Composable
 fun PaywallScreen(viewModel: PaywallViewModel = koinViewModel()) {
     val state by viewModel.uiState.collectAsState()
@@ -124,15 +158,16 @@ fun PaywallScreen(viewModel: PaywallViewModel = koinViewModel()) {
         viewModel.purchaseSuccess.collect { /* navigate away */ }
     }
 
+    if (state.purchase == PurchaseUiState.Pending) {
+        Text("Payment pending. Premium unlocks as soon as it completes.")
+    }
+
     when (val plans = state.plans) {
         PlansState.Loading -> CircularProgressIndicator()
         PlansState.Unavailable -> Text("Subscriptions unavailable. Try again later.")
         is PlansState.Ready -> {
-            Button(onClick = { viewModel.purchase(PackageType.WEEKLY, planLabel = "Weekly") }) {
-                Text("Subscribe weekly")
-            }
-            Button(onClick = { viewModel.purchase(PackageType.ANNUAL, planLabel = "Yearly") }) {
-                Text("Subscribe yearly")
+            Button(onClick = { viewModel.purchase(PackageType.MONTHLY, planLabel = "Monthly") }) {
+                Text("Subscribe monthly · ${plans.offering.monthly?.storeProduct?.price?.formatted}")
             }
             TextButton(onClick = { viewModel.restorePurchases() }) {
                 Text("Restore purchases")
@@ -158,14 +193,38 @@ if (trial != null) {
 }
 ```
 
-- **Play Store:** trials come from the default subscription option; Google only
-  returns offers the user is eligible for.
-- **App Store:** the introductory free trial is checked with RevenueCat's
-  eligibility API. Only `ELIGIBLE` shows the trial; `UNKNOWN` hides it.
+`StoreProduct.freeTrial` (and `Package.freeTrial()`) is already eligibility-filtered on both stores, so it's safe to use outside `PaywallViewModel` too.
 
-Outside `PaywallViewModel` (e.g. a custom promo screen), call
-`billingManager.getEligibleFreeTrials(offering.availablePackages)` yourself.
-`Package.freeTrial()` alone is **not** eligibility-filtered on iOS.
+## Testing
+
+| Where | How |
+|---|---|
+| Unit tests, debug builds | `FakeStoreClient`: set `nextPurchase` to `Succeed`, `Cancel`, `Pend` or `Fail(...)`; change `owned` and call `emitUpdate()` to simulate renewals, refunds and approved payments. |
+| iOS, no App Store account | A StoreKit Configuration file (`.storekit`) selected in the Xcode scheme: local products, accelerated renewals, failed payments, refunds, Ask to Buy. |
+| iOS, real store | App Store Connect sandbox testers and TestFlight. |
+| Android | Upload a build to a Play testing track (internal is enough) and add license testers; test cards approve, decline or approve slowly; renewals are accelerated. Play Billing Lab resets trial eligibility. |
+
+Library tests: `./gradlew :paywall-core:testDebugUnitTest :paywall-core:iosSimulatorArm64Test`.
+
+## Migrating from 0.5.x
+
+| 0.5.x (RevenueCat) | 1.0.0 |
+|---|---|
+| `RevenueCatConfig(apiKey, entitlementId, …)` | `BillingConfig(offerings, premiumProductIds)` |
+| `configureRevenueCat(config)` at launch | create the platform `StoreClient`, then `billingManager.start()` at launch |
+| `BillingManager(crashReporter)` | `BillingManager(config, store, crashReporter)` |
+| `PaywallViewModel(config, billingManager, …)` | `PaywallViewModel(billingManager, …)` (no config) |
+| RevenueCat dashboard offerings | `OfferingConfig` in the app: changing which plans a paywall shows needs an app update (prices still change in the stores) |
+| `com.revenuecat.purchases.kmp.models.*` (`Offering`, `Package`, `PackageType`, `Price`, `Period`, `CustomerInfo`) | same names in `io.github.aleksandarrado93.paywall` |
+| `PackageType.UNKNOWN`, `CUSTOM`; `PeriodUnit.UNKNOWN` | removed |
+| `customerInfo.hasActivePremium(entitlementId)` | `customerInfo.hasActivePremium()` / `CustomerInfo.isPremium` |
+| `PurchasesTransactionException` | `BillingException(code, message)`; cancel and pending are results, not exceptions |
+| `PurchaseResult(transaction, customerInfo)` | sealed `PurchaseResult.Success` / `Pending` / `Cancelled` |
+| `BillingManager.getEligibleFreeTrials(packages)` | removed: `StoreProduct.freeTrial` is already filtered |
+| — | `PurchaseUiState.Pending` (show "payment pending") |
+| — | `BillingManager.appAccountToken`: optional user id attached to purchases (UUID on iOS) for linking to your own accounts later |
+
+Purchases live in Google Play and the App Store, not in RevenueCat, so existing subscribers keep premium after switching as long as the product ids stay the same.
 
 ## Why bridges instead of direct Firebase dependency?
 
@@ -177,22 +236,19 @@ The library is intentionally agnostic about your analytics/crash/persistence sta
 
 ## Common pitfalls
 
-A few non-obvious gotchas the library can't fix for you:
-
 ### iOS Swift symbols and the `.ios.kt` filename suffix
 
 If you call into Kotlin from Swift via the `*Kt` file accessor (e.g. `MyHelperKt.something()`), the file containing the `actual` function in `iosMain` should be named `MyHelper.kt` — **not** `MyHelper.ios.kt`. Kotlin/Native turns `MyHelper.ios.kt` into the Swift symbol `MyHelper_iosKt`, and your existing Swift call won't compile.
 
 Either drop the `.ios.kt` suffix on files Swift directly calls into, or update the Swift caller to use `MyHelper_iosKt.something()`.
 
-### Koin `viewModelOf(::PaywallViewModel)` requires explicit DSL
+### Koin `viewModelOf(::PaywallViewModel)`
 
-`PaywallViewModel` has a `productLoadTimeoutMs: Long = 5_000L` parameter with a default value. Koin's `viewModelOf(::PaywallViewModel)` shortcut is reflection-based and doesn't honor Kotlin default values — it will crash at first paywall open with `NoDefinitionFoundException: java.lang.Long`. Use the explicit DSL instead:
+Prefer the explicit DSL. Reflection-based `viewModelOf` doesn't honor Kotlin default values, so any constructor parameter with a default (now or in a subclass) crashes at first paywall open with `NoDefinitionFoundException`:
 
 ```kotlin
 viewModel {
     PaywallViewModel(
-        config = get(),
         billingManager = get(),
         premiumRepository = get(),
         analytics = get(),
@@ -201,15 +257,21 @@ viewModel {
 }
 ```
 
-### `test_*` API keys in production builds
+### Forgetting `billingManager.start()`
 
-RevenueCat's cross-platform `test_*` keys point at the Test Store and crash production-signed apps on launch. Always set `acceptTestKeys = isDebugBuild` in your `RevenueCatConfig` so release builds reject them automatically.
+Without it, the store listener only starts on the first billing call. Renewals, refunds and purchases that completed while the app was closed are then picked up late, and on iOS StoreKit warns about transactions nobody listened to.
 
 ## Versioning
 
-Pre-1.0 (`0.x.y`) versions may have breaking API changes between minor versions. Once `1.0.0` ships, semantic versioning applies strictly.
+Semantic versioning applies from 1.0.0. Pre-releases (`1.0.0-alphaNN`) may still change.
 
 ## Changelog
+
+### 1.0.0-alpha01
+- **Breaking:** replaced RevenueCat with native billing: Google Play Billing 8.0.0 (`AndroidStoreClient`) and StoreKit 2 through a Swift bridge (`IosStoreClient` + `ios/PaywallStoreKitBridge.swift`). See [Migrating from 0.5.x](#migrating-from-05x).
+- Added `BillingConfig` / `OfferingConfig`, the `StoreClient` interface, `FakeStoreClient`, `BillingException`, `PurchaseUiState.Pending`, `BillingManager.start()` and `BillingManager.appAccountToken`.
+- Own models replace the RevenueCat types (`Offering`, `Package`, `PackageType`, `StoreProduct`, `Price`, `Period`, `FreeTrial`, `CustomerInfo`, `StoreTransaction`).
+- Unit tests for `BillingManager` and `PaywallViewModel` (Android host and iOS simulator).
 
 ### 0.5.0
 - Updated RevenueCat KMP from 2.10.1 to 3.16.0 (native iOS SDK 5.98.0). Fixes the iOS build with Xcode 27, which rejects `PaywallColor.swift` in the iOS SDK 5.67.0 that 2.10.1 pinned.

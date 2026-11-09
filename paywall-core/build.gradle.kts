@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "io.github.aleksandarrado93.paywall"
-version = "0.5.0"
+version = "1.0.0-alpha01"
 
 kotlin {
     @OptIn(ExperimentalKotlinGradlePluginApi::class)
@@ -39,7 +39,14 @@ kotlin {
         commonMain.dependencies {
             api(libs.kotlinx.coroutines.core)
             api(libs.androidx.lifecycle.viewmodel)
-            api(libs.purchases.kmp.core)
+        }
+        androidMain.dependencies {
+            implementation(libs.play.billing)
+            implementation(libs.kotlinx.coroutines.android)
+        }
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+            implementation(libs.kotlinx.coroutines.test)
         }
     }
 }
@@ -64,8 +71,8 @@ publishing {
             pom {
                 name.set("paywall-core")
                 description.set(
-                    "Reusable RevenueCat-backed subscription/billing layer for Kotlin " +
-                        "Multiplatform apps (Android + iOS). Provides BillingManager, " +
+                    "Reusable subscription/billing layer for Kotlin Multiplatform apps " +
+                        "on Google Play Billing and StoreKit 2. Provides BillingManager, " +
                         "PaywallViewModel, and bridge interfaces for analytics and crash " +
                         "reporting integration.",
                 )

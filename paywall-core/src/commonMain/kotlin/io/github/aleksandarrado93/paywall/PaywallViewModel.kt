@@ -2,15 +2,11 @@ package io.github.aleksandarrado93.paywall
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.revenuecat.purchases.kmp.models.Offering
-import com.revenuecat.purchases.kmp.models.Package
-import com.revenuecat.purchases.kmp.models.PackageType
-import com.revenuecat.purchases.kmp.models.PurchasesTransactionException
 import io.github.aleksandarrado93.paywall.bridges.PaywallAnalyticsBridge
 import io.github.aleksandarrado93.paywall.bridges.PaywallCrashReporterBridge
 import io.github.aleksandarrado93.paywall.bridges.PremiumStateRepository
 import io.github.aleksandarrado93.paywall.extensions.activePremiumProductId
-import io.github.aleksandarrado93.paywall.extensions.hasActivePremium
+import io.github.aleksandarrado93.paywall.store.BillingException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,6 +14,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -25,7 +23,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * ViewModel that drives a single paywall screen. Combines
  * [PremiumStateRepository.isPremium] (the consumer app's cached premium flag)
- * with [BillingManager.customerInfo] (live RevenueCat state) and the in-flight
+ * with [BillingManager.customerInfo] (live store state) and the in-flight
  * plan/purchase states.
  *
  * The ViewModel does NOT know about app-specific UI variants. The consumer app
@@ -48,14 +46,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  * primary constructor reflection-friendly so Koin's `viewModelOf(::PaywallViewModel)`
  * works without an explicit DSL block.
  *
- * @param config The active [RevenueCatConfig] (for entitlement id resolution).
- * @param billingManager Wraps the RevenueCat SDK.
+ * @param billingManager Wraps the store.
  * @param premiumRepository Persisted "is premium?" cache, written on success.
  * @param analytics Bridge for tracking conversion / failure events.
  * @param crashReporter Bridge for reporting non-fatal exceptions.
  */
 open class PaywallViewModel(
-    config: RevenueCatConfig,
     private val billingManager: BillingManager,
     private val premiumRepository: PremiumStateRepository,
     private val analytics: PaywallAnalyticsBridge,
@@ -67,8 +63,6 @@ open class PaywallViewModel(
      * [PlansState.Unavailable]. Override in a subclass to customize.
      */
     protected open val productLoadTimeoutMs: Long = DEFAULT_PRODUCT_LOAD_TIMEOUT_MS
-
-    private val entitlementId = config.entitlementId
 
     private val _plansState = MutableStateFlow<PlansState>(PlansState.Loading)
     private val _purchaseState = MutableStateFlow<PurchaseUiState>(PurchaseUiState.Idle)
@@ -83,7 +77,7 @@ open class PaywallViewModel(
     ) { isPremium, customerInfo, plans, purchase, freeTrials ->
         PaywallUiState(
             isPremium = isPremium,
-            activePremiumProductId = customerInfo.activePremiumProductId(entitlementId),
+            activePremiumProductId = customerInfo.activePremiumProductId(),
             plans = plans,
             purchase = purchase,
             freeTrials = freeTrials,
@@ -111,13 +105,10 @@ open class PaywallViewModel(
                     billingManager.refreshCustomerInfo()
                     billingManager.getCurrentOffering()
                 }
-                // Resolve trials before publishing Ready so trial copy doesn't pop
-                // in after the prices. A slow eligibility check just hides trials.
-                _freeTrials.value = offering?.let {
-                    withTimeoutOrNull(productLoadTimeoutMs) {
-                        billingManager.getEligibleFreeTrials(it.availablePackages)
-                    }
-                }.orEmpty()
+                _freeTrials.value = offering?.availablePackages
+                    ?.mapNotNull { pkg -> pkg.freeTrial()?.let { pkg.identifier to it } }
+                    ?.toMap()
+                    .orEmpty()
                 _plansState.value = if (offering != null) {
                     PlansState.Ready(offering)
                 } else {
@@ -132,26 +123,25 @@ open class PaywallViewModel(
 
     /**
      * Resolves the [packageType] in the current offering and starts a purchase.
-     * Falls back to a fresh offerings lookup if the cached state hasn't resolved
-     * yet. Emits to [purchaseSuccess] on entitlement activation; otherwise
-     * publishes a [PurchaseUiState.Error] to [uiState].
+     * Falls back to a fresh offering lookup if the cached state hasn't resolved
+     * yet. Emits to [purchaseSuccess] on premium activation; otherwise
+     * publishes a [PurchaseUiState.Error] or [PurchaseUiState.Pending] to [uiState].
      *
-     * @param packageType The RevenueCat package type to purchase.
+     * @param packageType The plan to purchase.
      * @param planLabel A short label for analytics (e.g. "Weekly", "Yearly", "Trial").
      */
     fun purchase(packageType: PackageType, planLabel: String = packageType.name) {
         runPurchase(plan = planLabel) {
-            val pkg = resolvePackage(packageType) ?: error(ERROR_PRODUCT_UNAVAILABLE)
+            val pkg = resolvePackage(packageType)
+                ?: throw IllegalStateException(ERROR_PRODUCT_UNAVAILABLE)
             billingManager.purchase(pkg)
         }
     }
 
     /**
-     * Starts a purchase for an already-resolved [packageToPurchase], regardless
-     * of its [PackageType] (works for custom packages and packages that live in
-     * a non-current offering — see [BillingManager.getOffering]). Shares the
-     * same orchestration as [purchase]: emits to [purchaseSuccess] on
-     * entitlement activation, otherwise publishes a [PurchaseUiState.Error].
+     * Starts a purchase for an already-resolved [packageToPurchase] (works for
+     * packages that live in a non-current offering — see
+     * [BillingManager.getOffering]). Shares the same orchestration as [purchase].
      *
      * @param packageToPurchase The exact package to buy.
      * @param planLabel A short label for analytics. Defaults to the package id.
@@ -175,10 +165,14 @@ open class PaywallViewModel(
         viewModelScope.launch {
             _purchaseState.value = PurchaseUiState.Loading
             try {
-                val result = block()
-                handlePurchaseResult(plan = plan, isActive = result.customerInfo.hasActivePremium(entitlementId))
-            } catch (e: PurchasesTransactionException) {
-                handlePurchaseException(e)
+                when (val result = block()) {
+                    is PurchaseResult.Success -> handlePurchaseSuccess(plan, result.customerInfo.isPremium)
+                    PurchaseResult.Pending -> awaitPendingPurchase(plan)
+                    PurchaseResult.Cancelled -> _purchaseState.value = PurchaseUiState.Idle
+                }
+            } catch (e: BillingException) {
+                analytics.purchaseFailed(errorType = e.code.name)
+                _purchaseState.value = PurchaseUiState.Error(e.message ?: ERROR_PURCHASE_FAILED)
             } catch (e: Exception) {
                 analytics.purchaseFailed(errorType = e::class.simpleName ?: "unknown")
                 _purchaseState.value = PurchaseUiState.Error(e.message ?: ERROR_PURCHASE_FAILED)
@@ -186,7 +180,7 @@ open class PaywallViewModel(
         }
     }
 
-    private suspend fun handlePurchaseResult(plan: String, isActive: Boolean) {
+    private suspend fun handlePurchaseSuccess(plan: String, isActive: Boolean) {
         if (!isActive) {
             analytics.purchaseFailed(errorType = "not_active")
             _purchaseState.value = PurchaseUiState.Error(ERROR_PURCHASE_NOT_ACTIVE)
@@ -197,13 +191,11 @@ open class PaywallViewModel(
         signalPurchaseSuccess()
     }
 
-    private fun handlePurchaseException(e: PurchasesTransactionException) {
-        if (e.userCancelled) {
-            _purchaseState.value = PurchaseUiState.Idle
-            return
-        }
-        analytics.purchaseFailed(errorType = e.code.name)
-        _purchaseState.value = PurchaseUiState.Error(e.message)
+    /** Shows [PurchaseUiState.Pending] and finishes the purchase if premium arrives while the paywall is open. */
+    private suspend fun awaitPendingPurchase(plan: String) {
+        _purchaseState.value = PurchaseUiState.Pending
+        billingManager.customerInfo.drop(1).first { it?.isPremium == true }
+        if (_purchaseState.value == PurchaseUiState.Pending) handlePurchaseSuccess(plan, isActive = true)
     }
 
     fun restorePurchases() {
@@ -211,7 +203,7 @@ open class PaywallViewModel(
             _purchaseState.value = PurchaseUiState.Loading
             try {
                 val info = billingManager.restorePurchases()
-                if (info.hasActivePremium(entitlementId)) {
+                if (info.isPremium) {
                     premiumRepository.setPremium(true)
                     signalPurchaseSuccess()
                 } else {
@@ -242,21 +234,4 @@ open class PaywallViewModel(
         private const val ERROR_RESTORE_FAILED = "Restore failed"
         private const val ERROR_NO_ACTIVE_SUBSCRIPTION = "No active subscription found"
     }
-}
-
-/**
- * Looks up a predefined package by [PackageType] without throwing, returning null
- * when the offering doesn't include that type. Useful in Compose UI for reading
- * the formatted price of a specific plan without coupling to the variant enum
- * inside [PaywallViewModel].
- */
-fun Offering.packageOf(type: PackageType): Package? = when (type) {
-    PackageType.ANNUAL -> annual
-    PackageType.SIX_MONTH -> sixMonth
-    PackageType.THREE_MONTH -> threeMonth
-    PackageType.TWO_MONTH -> twoMonth
-    PackageType.MONTHLY -> monthly
-    PackageType.WEEKLY -> weekly
-    PackageType.LIFETIME -> lifetime
-    PackageType.UNKNOWN, PackageType.CUSTOM -> null
 }

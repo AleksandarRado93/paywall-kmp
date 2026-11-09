@@ -1,15 +1,18 @@
 package io.github.aleksandarrado93.paywall
 
-import com.revenuecat.purchases.kmp.models.CustomerInfo
-import com.revenuecat.purchases.kmp.models.StoreTransaction
+/** How [BillingManager.purchase] ended, when it didn't throw. */
+sealed interface PurchaseResult {
+    /**
+     * The store completed the purchase. [customerInfo] is re-read afterwards,
+     * so check [CustomerInfo.isPremium] rather than assuming it.
+     */
+    data class Success(
+        val transaction: StoreTransaction,
+        val customerInfo: CustomerInfo,
+    ) : PurchaseResult
 
-/**
- * Result of a successful [BillingManager.purchase] call. Contains the underlying
- * store transaction (null if RevenueCat resolved it without a fresh transaction,
- * e.g. a re-issued entitlement) and the latest [CustomerInfo] reflecting the new
- * entitlement state.
- */
-data class PurchaseResult(
-    val transaction: StoreTransaction?,
-    val customerInfo: CustomerInfo,
-)
+    /** Payment needs more steps; premium unlocks later through [BillingManager.customerInfo]. */
+    data object Pending : PurchaseResult
+
+    data object Cancelled : PurchaseResult
+}

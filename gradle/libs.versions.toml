@@ -5,12 +5,15 @@ kotlinx-coroutines = "1.10.2"
 android-compileSdk = "36"
 android-minSdk = "24"
 androidx-lifecycle = "2.9.6"
-purchases-kmp = "3.16.0"
+play-billing = "8.0.0"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 androidx-lifecycle-viewmodel = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel", version.ref = "androidx-lifecycle" }
-purchases-kmp-core = { module = "com.revenuecat.purchases:purchases-kmp-core", version.ref = "purchases-kmp" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+play-billing = { module = "com.android.billingclient:billing", version.ref = "play-billing" }
 
 [plugins]
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
